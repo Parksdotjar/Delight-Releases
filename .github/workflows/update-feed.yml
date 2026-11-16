@@ -1,0 +1,49 @@
+name: Generate update feed
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published stable tag (for example v0.0.2)'
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: update-feed-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  manifest:
+    if: github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Verify release and generate latest.json
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'A stable vX.Y.Z tag is required.' }
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,isPrerelease,body,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read the release.' }
+          if ($release.isDraft -or $release.isPrerelease -or $release.tagName -cne $env:RELEASE_TAG) { throw 'Only published stable releases can update the app.' }
+          $assets = @($release.assets | Where-Object name -cmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.exe$')
+          if ($assets.Count -eq 0) { throw 'Attach the standalone EXE, then run this workflow again with its tag.' }
+          foreach ($asset in $assets) {
+            if ($asset.size -lt 70 -or $asset.size -gt 2GB) { throw 'EXE size is outside the supported range.' }
+          }
+          $assetDirectory = Join-Path $env:RUNNER_TEMP 'delight-release-assets'
+          New-Item -ItemType Directory -Path $assetDirectory -Force | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern '*.exe' --dir $assetDirectory
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download release executables.' }
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'latest.json'
+          ./New-UpdateManifest.ps1 -Tag $env:RELEASE_TAG -AssetDirectory $assetDirectory -OutputPath $manifestPath -Notes $release.body
+          gh release upload $env:RELEASE_TAG $manifestPath --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot attach latest.json to the release.' }
