@@ -11,7 +11,7 @@ Official Windows releases and update feed for Delight Studio. This repository ho
 
 Upload the EXE **before** publishing. If you attach it later, use **Actions → Generate update feed → Run workflow** with the published tag, or edit/save the published release to regenerate its manifest. Tags alone do not update the feed. Drafts and prereleases are excluded.
 
-The first updater-enabled `0.0.1` build must be installed manually. An older EXE cannot gain the updater just by publishing a release. A tag of `v0.0.2` requires an EXE actually built as `0.0.2`.
+The first public release is `0.0.2` and includes the updater. Download and extract its Windows ZIP once to install. Existing updater-enabled `0.0.1` development builds can update directly; earlier EXEs without the updater need a manual download. Every release tag must match the version actually embedded in its EXE.
 
 ## Feed and recovery
 
@@ -21,7 +21,7 @@ The app accepts only this repository's stable release asset URLs, never downgrad
 
 Use a writable folder for the portable app. Program Files or another protected folder may require a manual update. No admin elevation or GitHub login is requested from users. Projects and preferences are kept separately from the executable. New dependencies and companion assets must remain compatible with the portable distribution; this updater replaces the EXE only. SHA-256 checks downloaded bytes against the HTTPS feed; it is not an Authenticode signature.
 
-Do not delete old releases while they are downloading, or replace an announced EXE in place. Publish a new version instead. No release binaries are published by the initial repository setup.
+Do not delete old releases while they are downloading, or replace an announced EXE in place. Publish a new version instead. Release binaries are published only by an explicitly authorized release action.
 
 ## Manual manifest generation
 
