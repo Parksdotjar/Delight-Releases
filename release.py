@@ -89,6 +89,7 @@ def mac_package(args):
                 name = f"icon_{size}x{size}{'@2x' if scale == 2 else ''}.png"
                 run("/usr/bin/sips", "-z", size * scale, size * scale, ROOT / "assets/branding/delight-logo.png", "--out", iconset / name)
         run("/usr/bin/iconutil", "-c", "icns", iconset, "-o", resources / "Delight.icns")
+        shutil.copy2(ROOT / "packaging/Delight.icns.attribution", resources / "Delight.icns.attribution")
         info = {
             "CFBundleName": "Delight", "CFBundleDisplayName": "Delight", "CFBundleIdentifier": BUNDLE_ID,
             "CFBundleExecutable": "delight", "CFBundlePackageType": "APPL", "CFBundleIconFile": "Delight.icns",
@@ -113,7 +114,15 @@ def mac_package(args):
         dmg = output / f"Delight-macos-{args.arch}.dmg"
         if dmg.exists():
             raise ValueError("Refusing to replace an existing package")
-        run("/usr/bin/hdiutil", "create", "-volname", "Delight", "-srcfolder", stage, "-format", "UDZO", dmg)
+        # hdiutil's automatic sizing can under-allocate the image filesystem after signing.
+        # Give HFS+ explicit metadata/headroom instead of relying on the host's default format.
+        payload = sum(item.stat().st_size for item in stage.rglob("*") if item.is_file() and not item.is_symlink())
+        image_mib = (payload + 1024**2 - 1) // 1024**2 + 64
+        free = shutil.disk_usage(output).free
+        if free < (image_mib * 2 + 64) * 1024**2:
+            raise RuntimeError(f"Not enough runner disk space for DMG staging: {free} bytes free")
+        print(f"DMG payload {payload} bytes; image capacity {image_mib} MiB; runner free {free} bytes", flush=True)
+        run("/usr/bin/hdiutil", "create", "-volname", "Delight", "-fs", "HFS+", "-size", f"{image_mib}m", "-srcfolder", stage, "-format", "UDZO", dmg)
         if os.environ.get("MACOS_NOTARY_PROFILE"):
             run("xcrun", "notarytool", "submit", dmg, "--keychain-profile", os.environ["MACOS_NOTARY_PROFILE"], "--wait")
             run("xcrun", "stapler", "staple", dmg)
