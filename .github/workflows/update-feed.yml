@@ -5,45 +5,88 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Published stable tag (for example v0.0.2)'
+        description: 'Published stable tag (vX.Y.Z); Windows EXE and both Mac DMGs are required'
         required: true
         type: string
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: update-feed-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 jobs:
-  manifest:
+  verify:
     if: github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease)
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            kind: windows
+            pattern: '*.exe'
+          - runner: macos-15
+            kind: macos
+            pattern: '*.dmg'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: main
           persist-credentials: false
-      - name: Verify release and generate latest.json
+      - name: Download stable release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          ASSET_PATTERN: ${{ matrix.pattern }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') { throw 'A stable vX.Y.Z tag is required.' }
-          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,isPrerelease,body,assets | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'Cannot read the release.' }
-          if ($release.isDraft -or $release.isPrerelease -or $release.tagName -cne $env:RELEASE_TAG) { throw 'Only published stable releases can update the app.' }
-          $assets = @($release.assets | Where-Object name -cmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\.exe$')
-          if ($assets.Count -eq 0) { throw 'Attach the standalone EXE, then run this workflow again with its tag.' }
-          foreach ($asset in $assets) {
-            if ($asset.size -lt 70 -or $asset.size -gt 2GB) { throw 'EXE size is outside the supported range.' }
-          }
-          $assetDirectory = Join-Path $env:RUNNER_TEMP 'delight-release-assets'
-          New-Item -ItemType Directory -Path $assetDirectory -Force | Out-Null
-          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern '*.exe' --dir $assetDirectory
-          if ($LASTEXITCODE -ne 0) { throw 'Cannot download release executables.' }
-          $manifestPath = Join-Path $env:RUNNER_TEMP 'latest.json'
-          ./New-UpdateManifest.ps1 -Tag $env:RELEASE_TAG -AssetDirectory $assetDirectory -OutputPath $manifestPath -Notes $release.body
-          gh release upload $env:RELEASE_TAG $manifestPath --repo $env:GITHUB_REPOSITORY --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Cannot attach latest.json to the release.' }
+          $release = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,isPrerelease,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.isDraft -or $release.isPrerelease -or $release.tagName -cne $env:RELEASE_TAG) { throw 'Expected a published stable release.' }
+          foreach ($asset in $release.assets) { if ($asset.name -like $env:ASSET_PATTERN -and ($asset.size -lt 64 -or $asset.size -gt 2GB)) { throw 'Asset size outside supported limits.' } }
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:ASSET_PATTERN --dir release-assets
+          if ($LASTEXITCODE -ne 0) { throw 'Release assets are missing.' }
+      - name: Verify Windows product, version and processor
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: ./New-UpdateManifest.ps1 -Tag $env:RELEASE_TAG -AssetDirectory release-assets -OutputPath windows.manifest.json
+      - name: Verify Mac disk images, bundle identity and processor
+        if: matrix.kind == 'macos'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: python3 release.py verify-images --tag "$RELEASE_TAG" --assets release-assets --output macos.manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-${{ matrix.kind }}
+          path: '*.manifest.json'
+          retention-days: 1
+  manifest:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: verified-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish complete verified feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.exe' --pattern '*.dmg' --dir release-assets
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > notes.txt
+          python3 release.py manifest --tag "$RELEASE_TAG" --assets release-assets --output latest.json --notes notes.txt
+          gh release upload "$RELEASE_TAG" latest.json --repo "$GITHUB_REPOSITORY" --clobber
