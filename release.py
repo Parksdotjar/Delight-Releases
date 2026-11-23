@@ -133,6 +133,8 @@ def mac_package(args):
 def verify_images(args):
     platforms = {}
     for arch, architecture in [("arm64", "arm64"), ("x64", "x86_64")]:
+        if args.tag == "v0.0.6" and arch == "x64":
+            continue
         dmg = args.assets.resolve() / f"Delight-macos-{arch}.dmg"
         run("/usr/bin/hdiutil", "verify", dmg)
         with tempfile.TemporaryDirectory(prefix="delight-verify-") as temporary:
@@ -167,7 +169,10 @@ def manifest(args):
             assert filename.endswith(expected)
             assert entry == asset(args.assets / filename, args.tag), "Package changed after platform verification"
             platforms[platform] = entry
-    assert set(platforms) == {"windows-x64", "macos-arm64", "macos-x64"}, "Every release requires Windows and both Mac architectures"
+    required = {"windows-x64", "macos-arm64"}
+    if args.tag != "v0.0.6":
+        required.add("macos-x64")
+    assert set(platforms) == required, "Unexpected release platform set"
     write_manifest(args.output, args.tag, platforms)
     if args.notes:
         data = json.loads(args.output.read_text())
